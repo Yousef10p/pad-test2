@@ -1,0 +1,30 @@
+# Only what the Streamlit app needs is pushed: app.py, foundpad_inference.py, requirements.txt
+# (+ main.py) and the one checkpoint the app loads by default.
+
+# Python / local environment
+venv/
+.venv/
+env/
+__pycache__/
+*.py[cod]
+tempCodeRunnerFile.py
+.ipynb_checkpoints/
+
+# test images - photos of real identity documents: never pushed
+dataset*/
+
+# checkpoints: only the default one (foundpad_inference.HF_FILE); the others and the
+# Hugging Face download cache stay local
+models/*
+!models/exp5_reproduceExp1withMoreData_kaggle_oldSaudiDocs/
+
+# secrets (HF_TOKEN etc.) - set them in Streamlit Cloud > Settings > Secrets instead
+.streamlit/secrets.toml
+.env
+
+# editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log

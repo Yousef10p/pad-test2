@@ -1,0 +1,18 @@
+# Everything foundpad_inference.py needs, standalone:
+#     pip install -r requirements-foundpad.txt
+#     python main.py image1.jpg image2.png      (or: python main.py --check)
+#
+# torch / torchvision: pip picks a CPU or CUDA build for your platform. For a specific CUDA
+# build, install those two first from https://pytorch.org/get-started/locally/ , then this file.
+# The first run downloads the frozen CLIP ViT-B/16 (openai/clip-vit-base-patch16, ~600 MB) into
+# the Hugging Face cache; later runs reuse it.
+
+torch>=2.1
+torchvision>=0.16          # Resize / ToTensor / Normalize
+transformers>=4.44         # CLIP ViT-B/16 (4.x and 5.x both work)
+peft>=0.13                 # the LoRA adapters (use_rslora)
+huggingface_hub>=0.24      # downloads the checkpoint from US10F/TPO_to_PID2 (private: needs HF_TOKEN)
+pillow>=10.0
+numpy>=1.24
+packaging>=23.0            # version check for an old torchao (Colab)
+pillow-heif>=0.16          # optional: .heic / .heif phone photos
