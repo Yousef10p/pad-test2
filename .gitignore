@@ -12,11 +12,14 @@ tempCodeRunnerFile.py
 
 # test images - photos of real identity documents: never pushed
 dataset*/
+bidrid/
 
 # checkpoints: only the default one (foundpad_inference.HF_FILE); the others and the
-# Hugging Face download cache stay local
+# Hugging Face download cache stay local. EXP6_3_2 is downloaded from the HF repo.
 models/*
 !models/exp5_reproduceExp1withMoreData_kaggle_oldSaudiDocs/
+exp6_3_2/
+.claude/
 
 # secrets (HF_TOKEN etc.) - set them in Streamlit Cloud > Settings > Secrets instead
 .streamlit/secrets.toml

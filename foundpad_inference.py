@@ -14,6 +14,8 @@ A private repo needs a token: token="hf_...", or the HF_TOKEN environment variab
 
 The checkpoint is what the notebook saves: {"model": state_dict, ...}. Tiny checkpoints hold the
 LoRA + head weights only (the frozen CLIP is rebuilt from CLIP_ID); a full state dict loads too.
+The backbone is read from the checkpoint's LoRA width (BACKBONES): 768 = ViT-B/16 at 224 (EXP1 / EXP5),
+1024 = ViT-L/14-336 at 336 (EXP6_3_2, frames stored at 384).
 
 Score = softmax P(bona fide), as in the paper: HIGH means bona fide, and an image is called
 bona fide when score >= threshold. The default threshold is the fixed 0.5 - the per-set EER
@@ -42,6 +44,9 @@ CLIP_MEAN = (0.4815, 0.4578, 0.4082)       # CLIP's native statistics, NOT Image
 CLIP_STD = (0.2686, 0.2613, 0.2758)
 BONA = 0                                   # label 0 = bona fide; the score is softmax[:, BONA]
 THRESHOLD = 0.5                            # fixed decision threshold
+# CLIP vision width (= a LoRA A matrix's input size) -> (CLIP model, stored frame size, model input)
+BACKBONES = {768: (CLIP_ID, FRAME_SIZE, INPUT_SIZE),
+             1024: ("openai/clip-vit-large-patch14-336", 384, 336)}    # EXP6_3_2: 384 -> 336, as 256 -> 224
 
 # ---------- where the trained checkpoints live ----------
 HF_REPO = "US10F/TPO_to_PID2"
@@ -93,7 +98,15 @@ class FoundPADInference:
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.threshold = float(threshold)
 
-        clip = CLIPModel.from_pretrained(CLIP_ID)
+        ck = torch.load(checkpoint, map_location="cpu", weights_only=False)
+        sd = ck["model"] if isinstance(ck, dict) and "model" in ck else ck
+        widths = {v.shape[1] for k, v in sd.items() if "lora_A" in k}
+        if len(widths) != 1 or next(iter(widths)) not in BACKBONES:
+            raise ValueError(f"{checkpoint} does not match FoundPAD: LoRA width {sorted(widths)}, "
+                             f"expected one of {sorted(BACKBONES)}")
+        self.clip_id, self.frame_size, self.input_size = BACKBONES[widths.pop()]
+
+        clip = CLIPModel.from_pretrained(self.clip_id)
         for p in clip.parameters():
             p.requires_grad = False
         # ModuleDict names its children "clip." and "head." - the notebook's FoundPAD key names
@@ -104,8 +117,6 @@ class FoundPADInference:
                 use_rslora=True, bias="none")),
             "head": torch.nn.Linear(clip.config.projection_dim, 2)})
 
-        ck = torch.load(checkpoint, map_location="cpu", weights_only=False)
-        sd = ck["model"] if isinstance(ck, dict) and "model" in ck else ck
         missing, unexpected = self.model.load_state_dict(sd, strict=False)
         lost = [k for k in missing if "lora_" in k or k.startswith("head.")]
         if unexpected or lost:                  # only the frozen CLIP may be absent from the file
@@ -113,15 +124,16 @@ class FoundPADInference:
                              f"missing, {len(unexpected)} unexpected (e.g. {(lost + unexpected)[:2]})")
         self.model.to(self.device).eval()
         self.epoch = ck.get("epoch") if isinstance(ck, dict) else None
-        self.to_tensor = transforms.Compose([transforms.Resize((INPUT_SIZE, INPUT_SIZE)),
+        self.to_tensor = transforms.Compose([transforms.Resize((self.input_size, self.input_size)),
                                              transforms.ToTensor(),
                                              transforms.Normalize(CLIP_MEAN, CLIP_STD)])
 
     def preprocess(self, image):
-        """One image -> a (1, 3, 224, 224) tensor, exactly as the notebook built its frames:
-        upright by EXIF orientation -> RGB -> 256x256 bicubic -> JPEG q95 (the notebook's frame
-        cache) -> 224x224 -> CLIP normalization. An image already 256x256 is used as is (no EXIF
-        turn, no JPEG), as the notebook does.
+        """One image -> a (1, 3, input_size, input_size) tensor, exactly as the notebook built its
+        frames: upright by EXIF orientation -> RGB -> frame_size bicubic -> JPEG q95 (the notebook's
+        frame cache) -> input_size -> CLIP normalization (256 -> 224 for ViT-B/16, 384 -> 336 for
+        ViT-L/14-336). An image already frame_size square is used as is (no EXIF turn, no JPEG),
+        as the notebook does.
 
         image: a file path, raw bytes, or a PIL image.
         Raises FileNotFoundError for a missing path, ValueError for anything that is not a
@@ -145,10 +157,10 @@ class FoundPADInference:
             img.load()                                     # decode NOW: a cut-off file raises here
             if img.width < 1 or img.height < 1:
                 raise ValueError(f"image has no pixels ({img.width}x{img.height})")
-            if img.size != (FRAME_SIZE, FRAME_SIZE):       # the notebook's frame cache
+            if img.size != (self.frame_size, self.frame_size):   # the notebook's frame cache
                 img = ImageOps.exif_transpose(img)         # turn phone photos upright (EXIF Orientation)
                 buf = io.BytesIO()
-                img.convert("RGB").resize((FRAME_SIZE, FRAME_SIZE), Image.BICUBIC).save(buf, "JPEG", quality=95)
+                img.convert("RGB").resize((self.frame_size, self.frame_size), Image.BICUBIC).save(buf, "JPEG", quality=95)
                 img = Image.open(io.BytesIO(buf.getvalue()))
             img = img.convert("RGB")
             return self.to_tensor(img).unsqueeze(0)
@@ -167,8 +179,9 @@ class FoundPADInference:
         """x: a tensor from preprocess(), or several stacked with torch.cat. Returns one dict per
         image: P(bona fide) - the paper's score, HIGH means bona fide - and the decision at the
         threshold. For frames of ONE video, average their scores first, as the notebook does."""
-        if not torch.is_tensor(x) or x.ndim != 4 or tuple(x.shape[1:]) != (3, INPUT_SIZE, INPUT_SIZE):
-            raise ValueError(f"expected a (N, 3, {INPUT_SIZE}, {INPUT_SIZE}) tensor from preprocess(), "
+        n = self.input_size
+        if not torch.is_tensor(x) or x.ndim != 4 or tuple(x.shape[1:]) != (3, n, n):
+            raise ValueError(f"expected a (N, 3, {n}, {n}) tensor from preprocess(), "
                              f"got {tuple(x.shape) if torch.is_tensor(x) else type(x).__name__}")
         e = self.model["clip"].get_image_features(pixel_values=x.to(self.device))   # float32, as trained
         if not torch.is_tensor(e):                   # transformers >= 5 returns a ModelOutput

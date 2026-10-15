@@ -21,7 +21,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))       # this folder, wherever 
 # FOLDERS = ["dataset1", "dataset2", "dataset3", "dataset4",   # folders next to this file,
 #            "dataset5", "dataset6", "dataset7"]               # or full paths
 
-FOLDERS = ["dataset_test_new"]
+FOLDERS = ["bidrid"]
 IMAGE_EXT = (".jpg", ".jpeg", ".png", ".bmp", ".webp", ".heic", ".heif")
 BATCH = 16                                              # images scored together
 LIST_BELOW = 50              # a folder with fewer images than this lists every image and its score
