@@ -2,9 +2,10 @@
 
     streamlit run app.py
 
-Two tabs, one model each: the current model (EXP5) and EXP6_3_2 (CLIP ViT-L/14-336), both
-checkpoints in the public Hugging Face repo (a local copy is used when there is one). A tab loads its model only once images are uploaded there,
-and each model is cached across reruns. Each tab's settings set the decision threshold on
+Three tabs, one model each: the current model (EXP5), EXP6_3_2 and best_ever (EXP6_3_4, the best
+SaudiDocs test/ AUC so far) - both CLIP ViT-L/14-336. Every checkpoint is in the public Hugging Face
+repo (a local copy is used when there is one). A tab loads its model only once images are uploaded
+there, and the model is cached across reruns. Each tab's settings set the decision threshold on
 P(bona fide) - an image is called bona fide when the score is at or above it.
 """
 import os
@@ -20,6 +21,7 @@ TYPES = ["jpg", "jpeg", "png", "bmp", "webp", "heic", "heif"]
 MODELS = {                                     # tab -> default checkpoint (a local .pth or a file in the HF repo)
     "Current model (EXP5)": HF_FILE,
     "EXP6_3_2": "exp6_3_2/best.pth",           # the local copy if run from this folder, else from the HF repo
+    "best_ever": "exp6_3_4/best.pth",          # EXP6_3_4: balanced batches, ~70 % SaudiDocs (test/ AUC 0.9987)
 }
 
 
