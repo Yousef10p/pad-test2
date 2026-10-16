@@ -2,97 +2,162 @@
 
     streamlit run app.py
 
-Four tabs, one model each: the current model (EXP5), EXP6_3_2, best_ever (EXP6_3_4, the best
-SaudiDocs test/ AUC so far) and exp6_3_5 - the last three CLIP ViT-L/14-336. Every checkpoint is in the public Hugging Face
-repo (a local copy is used when there is one). A tab loads its model only once images are uploaded
-there, and the model is cached across reruns. Each tab's settings set the decision threshold on
+Tabs: one per model - exp6_3_4 and exp6_3_7 (best on every SaudiDocs test/ metric), both CLIP
+ViT-L/14-336 - and comparison: upload the images once, pick a model for each of the two columns,
+and every row shows the same image with each model's prediction. Every checkpoint is in the public
+Hugging Face repo (a local copy is used when there is one).
+
+Memory: one ViT-L is ~2 GB and Streamlit Community Cloud allows ~2.7 GB, so only one model is held
+at a time. Scores are remembered per (checkpoint, image), so a rerun, a new threshold or the other
+comparison column only loads a model for images it has not scored yet. Each tab's threshold is on
 P(bona fide) - an image is called bona fide when the score is at or above it.
 """
+import gc
+import hashlib
 import os
+import threading
 
 import streamlit as st
 import torch
 
-from foundpad_inference import FoundPADInference, HF_FILE, THRESHOLD
+from foundpad_inference import FoundPADInference, THRESHOLD
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 BATCH = 16                                     # images scored together, as in main.py
 TYPES = ["jpg", "jpeg", "png", "bmp", "webp", "heic", "heif"]
-MODELS = {                                     # tab -> default checkpoint (a local .pth or a file in the HF repo)
-    "Current model (EXP5)": HF_FILE,
-    "EXP6_3_2": "exp6_3_2/best.pth",           # the local copy if run from this folder, else from the HF repo
-    "best_ever": "exp6_3_4/best.pth",          # EXP6_3_4: balanced batches, ~70 % SaudiDocs (test/ AUC 0.9987)
-    "exp6_3_5": "exp6_3_5/best.pth",           # EXP6_3_5: EXP5_2's data with ViT-L/14-336 (test/ AUC 0.9916)
+MODELS = {                                     # model name -> checkpoint (a local .pth or a file in the HF repo)
+    "exp6_3_4": "exp6_3_4/best.pth",           # balanced batches, ~70 % SaudiDocs (test/ AUC 0.9987)
+    "exp6_3_7 (best in metrics)": "exp6_3_7/best.pth",   # exp6_3_4 + BID / RID (test/ AUC 0.9989, ACER 0.042)
 }
 
 
-@st.cache_resource(max_entries=1, show_spinner="Loading the model (the first run downloads CLIP)...")
-def load_model(checkpoint, mtime):
-    """The FoundPADInference of one checkpoint, kept alive across reruns. Only one model is held at
-    a time (ViT-L alone is ~2 GB; Streamlit Community Cloud allows ~2.7 GB), so switching tabs
-    reloads. mtime (the local file's modification time) is only part of the cache key: a replaced
-    .pth is loaded again."""
-    return FoundPADInference(checkpoint, download_dir=os.path.join(HERE, "models"))
+@st.cache_resource
+def model_slot():
+    """The one loaded model, shared by every tab and session; the lock keeps a session from swapping
+    the model while another one is scoring with it."""
+    return {"key": None, "pad": None, "lock": threading.Lock()}
 
 
-def pad_tab(key, default_checkpoint):
-    """One tab: settings, uploader, then every image with its score."""
+@st.cache_resource
+def score_memory():
+    """(checkpoint, mtime, image sha1) -> (P(bona fide), None) or (None, error message)."""
+    return {}
+
+
+def ckpt_key(checkpoint):
+    """mtime is part of the key: a replaced local .pth is loaded (and scored) again."""
+    return checkpoint, os.path.getmtime(checkpoint) if os.path.isfile(checkpoint) else None
+
+
+def scores(checkpoint, files, label):
+    """One (score, error) per uploaded file; the model is loaded only for images not scored yet."""
+    memory, key = score_memory(), ckpt_key(checkpoint)
+    ids = [(*key, hashlib.sha1(f.getvalue()).hexdigest()) for f in files]
+    todo = [(i, f) for i, f in zip(ids, files) if i not in memory]
+    if todo:
+        slot = model_slot()
+        with slot["lock"]:
+            if slot["key"] != key:
+                slot["pad"] = slot["key"] = None          # free the old model before loading the next
+                gc.collect()
+                with st.spinner(f"Loading {label} (the first run downloads CLIP)..."):
+                    slot["pad"] = FoundPADInference(checkpoint, download_dir=os.path.join(HERE, "models"))
+                slot["key"] = key
+            pad = slot["pad"]
+            ready = []                                    # preprocess first: an unreadable file is reported
+            for i, f in todo:
+                try:
+                    ready.append((i, pad.preprocess(f.getvalue())))
+                except (FileNotFoundError, ValueError) as e:
+                    memory[i] = (None, str(e))
+            progress = st.progress(0.0, text=f"Scoring with {label}: 0/{len(ready)} images")
+            for b in range(0, len(ready), BATCH):
+                chunk = ready[b:b + BATCH]
+                for (i, _), r in zip(chunk, pad.infer(torch.cat([x for _, x in chunk]))):
+                    memory[i] = (r["score_bona_fide"], None)
+                done = min(b + BATCH, len(ready))
+                progress.progress(done / len(ready), text=f"Scoring with {label}: {done}/{len(ready)} images")
+            progress.empty()
+    return [memory[i] for i in ids]
+
+
+def card(f, score, error, threshold):
+    """One image and its prediction."""
+    st.image(f.getvalue(), width="stretch")
+    if error:
+        st.warning(error)
+    elif score >= threshold:
+        st.success(f"**bona fide** - P(bona fide) {100 * score:.4f}")
+    else:
+        st.error(f"**attack** - P(bona fide) {100 * score:.4f}")
+    if not error:
+        st.progress(score)
+    st.caption(f.name)
+
+
+def counts(results, threshold, cols):
+    scored = [s for s, e in results if e is None]
+    bona = sum(s >= threshold for s in scored)
+    a, b, c = cols
+    a.metric("Images scored", len(scored))
+    b.metric("Bona fide", bona)
+    c.metric("Attack", len(scored) - bona)
+
+
+def threshold_slider(key):
+    return st.slider("Threshold on P(bona fide)", 0.0, 1.0, THRESHOLD, 0.01, key=key,
+                     help="Bona fide when the score is at or above this.")
+
+
+def model_tab(name, default_checkpoint):
+    """One model: settings, uploader, then every image with its score, three per row."""
     with st.expander("Settings"):
-        checkpoint = st.text_input("Checkpoint", default_checkpoint, key=f"{key}_ckpt",
+        checkpoint = st.text_input("Checkpoint", default_checkpoint, key=f"{name}_ckpt",
                                    help="A local .pth, or a file inside the Hugging Face repo.")
-        threshold = st.slider("Threshold on P(bona fide)", 0.0, 1.0, THRESHOLD, 0.01, key=f"{key}_thr",
-                              help="Bona fide when the score is at or above this.")
-
-    files = st.file_uploader("Images", type=TYPES, accept_multiple_files=True, key=f"{key}_files")
+        threshold = threshold_slider(f"{name}_thr")
+    files = st.file_uploader("Images", type=TYPES, accept_multiple_files=True, key=f"{name}_files")
     if not files:
         st.info("Waiting for images.")
         return
-
     try:
-        pad = load_model(checkpoint, os.path.getmtime(checkpoint) if os.path.isfile(checkpoint) else None)
+        results = scores(checkpoint, files, name)
     except (FileNotFoundError, ValueError) as e:
         st.error(f"Could not load the model: {e}")
         return
-    pad.threshold = float(threshold)           # the slider wins over the cached model's value
-
-    # preprocess first, so an unreadable file is reported instead of breaking the batch
-    ready, failed = [], []
-    for f in files:
-        try:
-            ready.append((f, pad.preprocess(f.getvalue())))
-        except (FileNotFoundError, ValueError) as e:
-            failed.append((f.name, str(e)))
-
-    results = []
-    progress = st.progress(0.0, text=f"Scoring 0/{len(ready)} images")
-    for b in range(0, len(ready), BATCH):
-        chunk = ready[b:b + BATCH]
-        for (f, _), r in zip(chunk, pad.infer(torch.cat([x for _, x in chunk]))):
-            results.append((f, r))
-        progress.progress(len(results) / len(ready), text=f"Scoring {len(results)}/{len(ready)} images")
-    progress.empty()
-
-    bona = sum(r["decision"] == "bona fide" for _, r in results)
-    a, b, c = st.columns(3)
-    a.metric("Images scored", len(results))
-    b.metric("Bona fide", bona)
-    c.metric("Attack", len(results) - bona)
+    counts(results, threshold, st.columns(3))
     st.divider()
-
-    for (f, r), col in zip(results, [c for row in range(0, len(results), 3)
-                                     for c in st.columns(3)]):
+    for (f, (s, e)), col in zip(zip(files, results), [c for _ in range(0, len(files), 3) for c in st.columns(3)]):
         with col:
-            st.image(f.getvalue(), width="stretch")
-            score = r["score_bona_fide"]
-            if r["decision"] == "bona fide":
-                st.success(f"**bona fide** - P(bona fide) {100 * score:.4f}")
-            else:
-                st.error(f"**attack** - P(bona fide) {100 * score:.4f}")
-            st.progress(score)
-            st.caption(f.name)
+            card(f, s, e, threshold)
 
-    for name, err in failed:
-        st.warning(f"{name}: {err}")
+
+def comparison_tab():
+    """Two columns, a model each; the images are uploaded once and every row is one image."""
+    with st.expander("Settings"):
+        threshold = threshold_slider("cmp_thr")
+    left, right = st.columns(2)
+    names = list(MODELS)
+    picked = [left.selectbox("Left model", names, index=0, key="cmp_left"),
+              right.selectbox("Right model", names, index=min(1, len(names) - 1), key="cmp_right")]
+    files = st.file_uploader("Images", type=TYPES, accept_multiple_files=True, key="cmp_files")
+    if not files:
+        st.info("Waiting for images.")
+        return
+    try:
+        results = [scores(MODELS[name], files, name) for name in picked]
+    except (FileNotFoundError, ValueError) as e:
+        st.error(f"Could not load the model: {e}")
+        return
+    for col, name, res in zip(st.columns(2), picked, results):
+        with col:
+            st.subheader(name)
+            counts(res, threshold, st.columns(3))
+    st.divider()
+    for k, f in enumerate(files):
+        for col, res in zip(st.columns(2), results):
+            with col:
+                card(f, *res[k], threshold)
+        st.divider()
 
 
 st.set_page_config(page_title="Document PAD", page_icon="🪪", layout="wide")
@@ -100,6 +165,9 @@ st.title("🪪 Document presentation-attack detection")
 st.caption("Pick a model, then upload one or more images of an ID document. Each is scored with "
            "FoundPAD + LoRA: P(bona fide) is high for a genuine capture, low for a screen / print attack.")
 
-for tab, (name, checkpoint) in zip(st.tabs(list(MODELS)), MODELS.items()):
+tabs = st.tabs([*MODELS, "comparison"])
+for tab, (name, checkpoint) in zip(tabs, MODELS.items()):
     with tab:
-        pad_tab(name, checkpoint)
+        model_tab(name, checkpoint)
+with tabs[-1]:
+    comparison_tab()
