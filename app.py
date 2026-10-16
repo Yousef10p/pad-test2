@@ -2,8 +2,8 @@
 
     streamlit run app.py
 
-Three tabs, one model each: the current model (EXP5), EXP6_3_2 and best_ever (EXP6_3_4, the best
-SaudiDocs test/ AUC so far) - both CLIP ViT-L/14-336. Every checkpoint is in the public Hugging Face
+Four tabs, one model each: the current model (EXP5), EXP6_3_2, best_ever (EXP6_3_4, the best
+SaudiDocs test/ AUC so far) and exp6_3_5 - the last three CLIP ViT-L/14-336. Every checkpoint is in the public Hugging Face
 repo (a local copy is used when there is one). A tab loads its model only once images are uploaded
 there, and the model is cached across reruns. Each tab's settings set the decision threshold on
 P(bona fide) - an image is called bona fide when the score is at or above it.
@@ -22,6 +22,7 @@ MODELS = {                                     # tab -> default checkpoint (a lo
     "Current model (EXP5)": HF_FILE,
     "EXP6_3_2": "exp6_3_2/best.pth",           # the local copy if run from this folder, else from the HF repo
     "best_ever": "exp6_3_4/best.pth",          # EXP6_3_4: balanced batches, ~70 % SaudiDocs (test/ AUC 0.9987)
+    "exp6_3_5": "exp6_3_5/best.pth",           # EXP6_3_5: EXP5_2's data with ViT-L/14-336 (test/ AUC 0.9916)
 }
 
 
@@ -53,9 +54,6 @@ def pad_tab(key, default_checkpoint):
         st.error(f"Could not load the model: {e}")
         return
     pad.threshold = float(threshold)           # the slider wins over the cached model's value
-    st.caption(f"`{os.path.basename(os.path.dirname(pad.checkpoint))}/{os.path.basename(pad.checkpoint)}`"
-               + (f" (epoch {pad.epoch})" if pad.epoch is not None else "")
-               + f" - {pad.clip_id.split('/')[-1]} at {pad.input_size}px on **{pad.device}**")
 
     # preprocess first, so an unreadable file is reported instead of breaking the batch
     ready, failed = [], []

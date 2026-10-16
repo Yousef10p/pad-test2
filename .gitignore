@@ -15,12 +15,13 @@ dataset*/
 bidrid/
 
 # checkpoints: only the default one (foundpad_inference.HF_FILE); the others and the
-# Hugging Face download cache stay local. EXP6_3_2 and EXP6_3_4 are downloaded from the HF repo.
+# Hugging Face download cache stay local. EXP6_3_2, EXP6_3_4 and EXP6_3_5 are downloaded from the HF repo.
 models/*
 !models/exp5_reproduceExp1withMoreData_kaggle_oldSaudiDocs/
 exp6_3_2/
 Exp6_3_4/
 exp6_3_4/
+exp6_3_5/
 .claude/
 
 # secrets (HF_TOKEN etc.) - set them in Streamlit Cloud > Settings > Secrets instead
