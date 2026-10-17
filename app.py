@@ -2,8 +2,8 @@
 
     streamlit run app.py
 
-Tabs: one per model - exp6_3_4 and exp6_3_7 (best on every SaudiDocs test/ metric), both CLIP
-ViT-L/14-336 - and comparison: upload the images once, pick a model for each of the two columns,
+Tabs: one per model - exp6_3_4, exp6_3_7 (best on every SaudiDocs test/ metric) and exp7_2 (trained
+without the SaudiDocs people's IDs), all CLIP ViT-L/14-336 - and comparison: upload the images once, pick a model for each of the two columns,
 and every row shows the same image with each model's prediction. Every checkpoint is in the public
 Hugging Face repo (a local copy is used when there is one).
 
@@ -28,6 +28,7 @@ TYPES = ["jpg", "jpeg", "png", "bmp", "webp", "heic", "heif"]
 MODELS = {                                     # model name -> checkpoint (a local .pth or a file in the HF repo)
     "exp6_3_4": "exp6_3_4/best.pth",           # balanced batches, ~70 % SaudiDocs (test/ AUC 0.9987)
     "exp6_3_7 (best in metrics)": "exp6_3_7/best.pth",   # exp6_3_4 + BID / RID (test/ AUC 0.9989, ACER 0.042)
+    "exp7_2": "exp7_2/best.pth",               # SaudiDocs IDs never trained on (all 44k: AUC 0.958; test/: 0.990)
 }
 
 
