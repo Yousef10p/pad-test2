@@ -2,13 +2,16 @@
 
     streamlit run app.py
 
-Tabs: one per model - exp6_3_4, exp6_3_7 (best on every SaudiDocs test/ metric) and exp7_2 (trained
-without the SaudiDocs people's IDs), all CLIP ViT-L/14-336 - and comparison: upload the images once, pick a model for each of the two columns,
-and every row shows the same image with each model's prediction. Every checkpoint is in the public
-Hugging Face repo (a local copy is used when there is one).
+Tabs: one per model - exp6_3_7 (CLIP ViT-L/14-336, best on every SaudiDocs test/ metric) and exp6_3_7
+on DINOv3 ViT-H+/16 (a checkpoint from inside its first epoch, never validated) - and comparison:
+upload the images once, pick a model for each of the two columns, and every row shows the same image
+with each model's prediction. Every checkpoint is in the public Hugging Face repo (a local copy is
+used when there is one). DINOv3 itself is gated: the HF_TOKEN secret (a read token of an account
+that accepted its license) is needed for its tab.
 
 Memory: one ViT-L is ~2 GB and Streamlit Community Cloud allows ~2.7 GB, so only one model is held
-at a time. Scores are remembered per (checkpoint, image), so a rerun, a new threshold or the other
+at a time; DINOv3 ViT-H+ is 3.4 GB in float32, so its frozen weights are loaded in bfloat16 (1.7 GB;
+LoRA and head stay float32). Scores are remembered per (checkpoint, image), so a rerun, a new threshold or the other
 comparison column only loads a model for images it has not scored yet. Each tab's threshold is on
 P(bona fide) - an image is called bona fide when the score is at or above it.
 """
@@ -26,10 +29,17 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 BATCH = 16                                     # images scored together, as in main.py
 TYPES = ["jpg", "jpeg", "png", "bmp", "webp", "heic", "heif"]
 MODELS = {                                     # model name -> checkpoint (a local .pth or a file in the HF repo)
-    "exp6_3_4": "exp6_3_4/best.pth",           # balanced batches, ~70 % SaudiDocs (test/ AUC 0.9987)
     "exp6_3_7 (best in metrics)": "exp6_3_7/best.pth",   # exp6_3_4 + BID / RID (test/ AUC 0.9989, ACER 0.042)
-    "exp7_2": "exp7_2/best.pth",               # SaudiDocs IDs never trained on (all 44k: AUC 0.958; test/: 0.990)
-}
+    "exp6_3_7 DINOv3 (partial)": "exp6_3_7_dinov3/partial_epoch1_batch862.pth",   # exp6_3_7 on DINOv3 ViT-H+/16,
+}                                              # stopped inside epoch 1 (batch 862) - never validated
+
+
+def hf_token():
+    """HF_TOKEN from Streamlit secrets, else the environment (None: public models only)."""
+    try:
+        return st.secrets.get("HF_TOKEN") or os.environ.get("HF_TOKEN")
+    except (FileNotFoundError, st.errors.StreamlitSecretNotFoundError):
+        return os.environ.get("HF_TOKEN")
 
 
 @st.cache_resource
@@ -61,8 +71,9 @@ def scores(checkpoint, files, label):
             if slot["key"] != key:
                 slot["pad"] = slot["key"] = None          # free the old model before loading the next
                 gc.collect()
-                with st.spinner(f"Loading {label} (the first run downloads CLIP)..."):
-                    slot["pad"] = FoundPADInference(checkpoint, download_dir=os.path.join(HERE, "models"))
+                with st.spinner(f"Loading {label} (the first run downloads its backbone)..."):
+                    slot["pad"] = FoundPADInference(checkpoint, download_dir=os.path.join(HERE, "models"),
+                                                    token=hf_token(), dino_dtype=torch.bfloat16)
                 slot["key"] = key
             pad = slot["pad"]
             ready = []                                    # preprocess first: an unreadable file is reported
@@ -122,7 +133,7 @@ def model_tab(name, default_checkpoint):
         return
     try:
         results = scores(checkpoint, files, name)
-    except (FileNotFoundError, ValueError) as e:
+    except (OSError, ValueError) as e:            # OSError: also a gated / unreachable HF download
         st.error(f"Could not load the model: {e}")
         return
     counts(results, threshold, st.columns(3))
@@ -146,7 +157,7 @@ def comparison_tab():
         return
     try:
         results = [scores(MODELS[name], files, name) for name in picked]
-    except (FileNotFoundError, ValueError) as e:
+    except (OSError, ValueError) as e:            # OSError: also a gated / unreachable HF download
         st.error(f"Could not load the model: {e}")
         return
     for col, name, res in zip(st.columns(2), picked, results):

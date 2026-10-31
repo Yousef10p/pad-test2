@@ -9,9 +9,9 @@
 
 torch>=2.1
 torchvision>=0.16          # Resize / ToTensor / Normalize
-transformers>=4.44         # CLIP ViT-B/16 (4.x and 5.x both work)
+transformers>=4.56         # CLIP and DINOv3 (4.56 is the first with DINOv3; 5.x works)
 peft>=0.13                 # the LoRA adapters (use_rslora)
-huggingface_hub>=0.24      # downloads the checkpoints from US10F/TPO_to_PID2 (public: no token needed)
+huggingface_hub>=0.24      # checkpoints from US10F/TPO_to_PID2 (public); DINOv3 is gated: HF_TOKEN
 pillow>=10.0
 numpy>=1.24
 packaging>=23.0            # version check for an old torchao (Colab)

@@ -1,8 +1,8 @@
-"""FoundPAD + LoRA document PAD - inference, exactly as the EXP5 notebook
-(TPO expirment/exp5_reproduceExp1/notebook2536ecccea.ipynb) scores its SaudiDocs test/ frames.
+"""FoundPAD + LoRA document PAD - inference, exactly as the training notebooks score their
+SaudiDocs test/ frames (the default model: exp6_3_7/EXP6_3_7.ipynb).
 
-    pad = FoundPADInference()                              # exp5_reproduceExp1withMoreData_kaggle_oldSaudiDocs/best.pth
-    pad = FoundPADInference("EXP1/best.pth")               # another checkpoint of the same pipeline
+    pad = FoundPADInference()                              # exp6_3_7/best.pth (EXP6_3_7)
+    pad = FoundPADInference("exp6_3_4/best.pth")           # another checkpoint of the same pipeline
     pad = FoundPADInference("C:/models/my_checkpoint.pth")   # or any local file
     x = pad.preprocess("id_photo.jpg")                     # raises ValueError / FileNotFoundError
     print(pad.infer(x))    # [{'score_bona_fide': 0.93, 'decision': 'bona fide', 'threshold': 0.5}]
@@ -10,19 +10,27 @@
 checkpoint: a local file, or a file inside HF_REPO. Looked for, in order: the path as given,
 DOWNLOAD_DIR/<path> (downloaded before - no network), else downloaded from HF_REPO into
 DOWNLOAD_DIR. Every FoundPAD checkpoint in the repo works - all come from the same pipeline.
-A private repo needs a token: token="hf_...", or the HF_TOKEN environment variable.
+A private repo needs a token: token="hf_...", or the HF_TOKEN environment variable. So does
+DINOv3, which is gated: the token's account must have accepted its license on Hugging Face.
 
 The checkpoint is what the notebook saves: {"model": state_dict, ...}. Tiny checkpoints hold the
-LoRA + head weights only (the frozen CLIP is rebuilt from CLIP_ID); a full state dict loads too.
-The backbone is read from the checkpoint's LoRA width (BACKBONES): 768 = ViT-B/16 at 224 (EXP1 / EXP5),
-1024 = ViT-L/14-336 at 336 (EXP6_3_2, frames stored at 384).
+LoRA + head weights only (the frozen backbone is rebuilt from its HF model id); a full state dict
+loads too. The backbone, its normalization and its image sizes come from the checkpoint itself
+(its LoRA width -> BACKBONES), so one class serves every kind:
+    768  = CLIP ViT-B/16       frame 256 -> input 224   (EXP1, EXP5)
+    1024 = CLIP ViT-L/14-336   frame 384 -> input 336   (EXP6_3_2 ... EXP6_3_7)
+    1280 = DINOv3 ViT-H+/16    frame 384 -> input 336   (EXP6_3_7_DINOV3_VITH_PLUS_KAGGLE)
+EXP6_3_7 = EXP6_3_4 + BID and RID in training; its preprocessing and scoring are EXP6_3_4's.
+The DINOv3 run is EXP6_3_7 with the backbone swapped: the head sits on DINOv3's pooler_output (the
+CLS token after the final norm, 1280-D) instead of CLIP's projected image embedding, and the
+normalization is DINOv3's (ImageNet) instead of CLIP's.
 
 Score = softmax P(bona fide), as in the paper: HIGH means bona fide, and an image is called
 bona fide when score >= threshold. The default threshold is the fixed 0.5 - the per-set EER
 thresholds in results.json were chosen WITH SaudiDocs labels and are not deployable.
 
-Requires: torch torchvision "transformers>=4.44" "peft>=0.13" pillow huggingface_hub
-          (pillow-heif for HEIC)
+Requires: torch torchvision "transformers>=4.56" "peft>=0.13" pillow huggingface_hub
+          (pillow-heif for HEIC; transformers 4.56 is the first with DINOv3)
 """
 import io
 import os
@@ -34,31 +42,54 @@ from torchvision import transforms
 
 Image.MAX_IMAGE_PIXELS = None              # as the notebook: phone photos can be 200 MP
 
-# ---------- the notebook's configuration - must match the trained model ----------
-CLIP_ID = "openai/clip-vit-base-patch16"
-LORA_R, LORA_ALPHA, LORA_DROPOUT = 8, 8, 0.4
-LORA_TARGETS = ["q_proj", "v_proj"]        # all 12 vision attention blocks
-FRAME_SIZE = 256                           # frames cached at 256x256 (JPEG q95), per the paper
-INPUT_SIZE = 224                           # model input
 CLIP_MEAN = (0.4815, 0.4578, 0.4082)       # CLIP's native statistics, NOT ImageNet
 CLIP_STD = (0.2686, 0.2613, 0.2758)
+DINO_MEAN = (0.485, 0.456, 0.406)          # DINOv3's own normalization (ImageNet)
+DINO_STD = (0.229, 0.224, 0.225)
+
+# ---------- the backbone - picked per checkpoint, never set by hand ----------
+# backbone width (= a LoRA A matrix's input size, read from the checkpoint) ->
+#   (HF model, frame size, model input, mean, std): the image is resized to frame size and JPEG-encoded
+#   as the notebook's frame cache, then resized to the model input and normalized with mean / std
+BACKBONES = {
+    768: ("openai/clip-vit-base-patch16", 256, 224, CLIP_MEAN, CLIP_STD),          # ViT-B/16: EXP1, EXP5 (the paper's sizes)
+    1024: ("openai/clip-vit-large-patch14-336", 384, 336, CLIP_MEAN, CLIP_STD),    # ViT-L/14-336: EXP6_3_2 ... EXP6_3_7 (same ratio)
+    1280: ("facebook/dinov3-vith16plus-pretrain-lvd1689m", 384, 336, DINO_MEAN, DINO_STD),   # DINOv3 ViT-H+/16 (gated)
+}
+
+# ---------- the rest of the notebooks' configuration - the same for every backbone ----------
+LORA_R, LORA_ALPHA, LORA_DROPOUT = 8, 8, 0.4
+LORA_TARGETS = {                           # q and v of every attention block (12 in ViT-B, 24 in ViT-L, 32 in ViT-H+)
+    "clip": r".*vision_model.*\.(q_proj|v_proj)",           # CLIP: the vision tower only
+    "dino": r".*layer\.\d+\.attention\.(q_proj|v_proj)",    # DINOv3's module names
+}
 BONA = 0                                   # label 0 = bona fide; the score is softmax[:, BONA]
 THRESHOLD = 0.5                            # fixed decision threshold
-# CLIP vision width (= a LoRA A matrix's input size) -> (CLIP model, stored frame size, model input)
-BACKBONES = {768: (CLIP_ID, FRAME_SIZE, INPUT_SIZE),
-             1024: ("openai/clip-vit-large-patch14-336", 384, 336)}    # EXP6_3_2: 384 -> 336, as 256 -> 224
 
 # ---------- where the trained checkpoints live ----------
 HF_REPO = "US10F/TPO_to_PID2"
-HF_FILE = "exp5_reproduceExp1withMoreData_kaggle_oldSaudiDocs/best.pth"   # EXP5 (Kaggle), epoch 1
-DOWNLOAD_DIR = "models"                          # downloads land in DOWNLOAD_DIR/<path in the repo>
+HF_FILE = "exp6_3_7/best.pth"              # the default model: EXP6_3_7 (ViT-L/14-336), epoch 1
+DOWNLOAD_DIR = "models"                    # downloads land in DOWNLOAD_DIR/<path in the repo>
+
+
+def lora_width(sd):
+    """The backbone width a FoundPAD state dict was trained on (its LoRA A matrices' input size,
+    a BACKBONES key); ValueError when it is not one FoundPAD state dict."""
+    widths = {v.shape[1] for k, v in sd.items() if "lora_A" in k}
+    if len(widths) != 1 or next(iter(widths)) not in BACKBONES:
+        raise ValueError(f"not a FoundPAD checkpoint: LoRA width {sorted(widths)}, "
+                         f"expected one of {sorted(BACKBONES)}")
+    return widths.pop()
 
 
 class FoundPADInference:
     def __init__(self, checkpoint=HF_FILE, device=None, threshold=THRESHOLD, repo=HF_REPO,
-                 token=None, download_dir=DOWNLOAD_DIR):
-        """Rebuild CLIP ViT-B/16 + rank-stabilized LoRA + linear head and load the checkpoint -
-        a local file, or a file inside `repo`, downloaded into `download_dir` the first time."""
+                 token=None, download_dir=DOWNLOAD_DIR, dino_dtype=torch.float32):
+        """Rebuild the checkpoint's backbone (BACKBONES: CLIP or DINOv3) + rank-stabilized LoRA +
+        linear head and load the checkpoint - a local file, or a file inside `repo`, downloaded
+        into `download_dir` the first time. dino_dtype: the frozen DINOv3's weights - float32 as
+        the notebook evaluates (3.4 GB), or torch.bfloat16 (1.7 GB) where memory is short (the
+        Streamlit Cloud app); LoRA and head stay float32 either way."""
         import importlib.metadata
         import importlib.util
         import subprocess
@@ -78,7 +109,7 @@ class FoundPADInference:
         except ImportError:
             pass
         from peft import LoraConfig, get_peft_model
-        from transformers import CLIPModel
+        from transformers import AutoModel, CLIPModel
 
         checkpoint = str(checkpoint)
         downloaded = os.path.normpath(os.path.join(download_dir, checkpoint))
@@ -100,22 +131,26 @@ class FoundPADInference:
 
         ck = torch.load(checkpoint, map_location="cpu", weights_only=False)
         sd = ck["model"] if isinstance(ck, dict) and "model" in ck else ck
-        widths = {v.shape[1] for k, v in sd.items() if "lora_A" in k}
-        if len(widths) != 1 or next(iter(widths)) not in BACKBONES:
-            raise ValueError(f"{checkpoint} does not match FoundPAD: LoRA width {sorted(widths)}, "
-                             f"expected one of {sorted(BACKBONES)}")
-        self.clip_id, self.frame_size, self.input_size = BACKBONES[widths.pop()]
+        try:
+            width = lora_width(sd)
+        except ValueError as e:
+            raise ValueError(f"{checkpoint} does not match FoundPAD: {e}") from None
+        self.clip_id, self.frame_size, self.input_size, mean, std = BACKBONES[width]
+        self.kind = "dino" if width == 1280 else "clip"   # the notebook's attribute name = its key prefix
 
-        clip = CLIPModel.from_pretrained(self.clip_id)
-        for p in clip.parameters():
-            p.requires_grad = False
-        # ModuleDict names its children "clip." and "head." - the notebook's FoundPAD key names
+        if self.kind == "dino":                            # float32 weights, as the notebook, unless dino_dtype
+            backbone = AutoModel.from_pretrained(self.clip_id, token=token, dtype=dino_dtype)
+            embed_dim = backbone.config.hidden_size        # 1280: the head sits on pooler_output
+        else:
+            backbone = CLIPModel.from_pretrained(self.clip_id)
+            embed_dim = backbone.config.projection_dim     # CLIP's projected image embedding
+        backbone.requires_grad_(False)
+        # ModuleDict names its children "clip." / "dino." and "head." - the notebooks' FoundPAD key names
         self.model = torch.nn.ModuleDict({
-            "clip": get_peft_model(clip, LoraConfig(
+            self.kind: get_peft_model(backbone, LoraConfig(
                 r=LORA_R, lora_alpha=LORA_ALPHA, lora_dropout=LORA_DROPOUT,
-                target_modules=r".*vision_model.*\.(" + "|".join(LORA_TARGETS) + r")",
-                use_rslora=True, bias="none")),
-            "head": torch.nn.Linear(clip.config.projection_dim, 2)})
+                target_modules=LORA_TARGETS[self.kind], use_rslora=True, bias="none")),
+            "head": torch.nn.Linear(embed_dim, 2)})
 
         missing, unexpected = self.model.load_state_dict(sd, strict=False)
         lost = [k for k in missing if "lora_" in k or k.startswith("head.")]
@@ -123,17 +158,19 @@ class FoundPADInference:
             raise ValueError(f"{checkpoint} does not match FoundPAD: {len(lost)} LoRA/head weights "
                              f"missing, {len(unexpected)} unexpected (e.g. {(lost + unexpected)[:2]})")
         self.model.to(self.device).eval()
+        self.dtype = next(self.model[self.kind].get_base_model().parameters()).dtype   # the backbone's input dtype
         self.epoch = ck.get("epoch") if isinstance(ck, dict) else None
         self.to_tensor = transforms.Compose([transforms.Resize((self.input_size, self.input_size)),
                                              transforms.ToTensor(),
-                                             transforms.Normalize(CLIP_MEAN, CLIP_STD)])
+                                             transforms.Normalize(mean, std)])
 
     def preprocess(self, image):
         """One image -> a (1, 3, input_size, input_size) tensor, exactly as the notebook built its
         frames: upright by EXIF orientation -> RGB -> frame_size bicubic -> JPEG q95 (the notebook's
-        frame cache) -> input_size -> CLIP normalization (256 -> 224 for ViT-B/16, 384 -> 336 for
-        ViT-L/14-336). An image already frame_size square is used as is (no EXIF turn, no JPEG),
-        as the notebook does.
+        frame cache) -> input_size -> the backbone's normalization. frame_size / input_size are the
+        loaded backbone's (BACKBONES): 256 -> 224 for ViT-B/16, 384 -> 336 for ViT-L/14-336 and
+        DINOv3 ViT-H+/16. An image
+        already frame_size square is used as is (no EXIF turn, no JPEG), as the notebook does.
 
         image: a file path, raw bytes, or a PIL image.
         Raises FileNotFoundError for a missing path, ValueError for anything that is not a
@@ -183,9 +220,13 @@ class FoundPADInference:
         if not torch.is_tensor(x) or x.ndim != 4 or tuple(x.shape[1:]) != (3, n, n):
             raise ValueError(f"expected a (N, 3, {n}, {n}) tensor from preprocess(), "
                              f"got {tuple(x.shape) if torch.is_tensor(x) else type(x).__name__}")
-        e = self.model["clip"].get_image_features(pixel_values=x.to(self.device))   # float32, as trained
-        if not torch.is_tensor(e):                   # transformers >= 5 returns a ModelOutput
-            e = e.pooler_output
+        x = x.to(self.device, self.dtype)            # float32, as the notebooks evaluate (unless dino_dtype)
+        if self.kind == "dino":                      # DINOv3: the CLS token after the final norm
+            e = self.model["dino"](pixel_values=x).pooler_output.float()
+        else:
+            e = self.model["clip"].get_image_features(pixel_values=x)
+            if not torch.is_tensor(e):               # transformers >= 5 returns a ModelOutput
+                e = e.pooler_output
         logits = self.model["head"](torch.nn.functional.normalize(e, dim=-1))
         scores = torch.softmax(logits, -1)[:, BONA].cpu().numpy()
         return [{"score_bona_fide": float(s),
@@ -197,8 +238,10 @@ if __name__ == "__main__":
     import argparse
     ap = argparse.ArgumentParser(description="FoundPAD document PAD: is each image bona fide?")
     ap.add_argument("images", nargs="+")
-    ap.add_argument("--model", default=HF_FILE,
-                    help=f"a local .pth, or a file inside {HF_REPO} (default {HF_FILE})")
+    local = os.path.join(os.path.dirname(os.path.abspath(__file__)), HF_FILE)   # the copy next to this file
+    default = local if os.path.isfile(local) else HF_FILE
+    ap.add_argument("--model", default=default,
+                    help=f"a local .pth, or a file inside {HF_REPO} (default {default})")
     ap.add_argument("--threshold", type=float, default=THRESHOLD)
     a = ap.parse_args()
     pad = FoundPADInference(a.model, threshold=a.threshold)
