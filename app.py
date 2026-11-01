@@ -10,8 +10,9 @@ used when there is one). DINOv3 itself is gated: the HF_TOKEN secret (a read tok
 that accepted its license) is needed for its tab.
 
 Memory: one ViT-L is ~2 GB and Streamlit Community Cloud allows ~2.7 GB, so only one model is held
-at a time; DINOv3 ViT-H+ is 3.4 GB in float32, so its Linear weights are stored in bfloat16 (1.7 GB)
-and cast to float32 layer by layer as they are used (foundpad_inference.load_lean). Scores are remembered per (checkpoint, image), so a rerun, a new threshold or the other
+at a time; DINOv3 ViT-H+ is 3.4 GB in float32, so its Linear weights are stored in int8 with a scale
+per row (0.85 GB; the app peaks ~1.5 GB) and made float32 layer by layer as they are used
+(foundpad_inference.load_lean; scores within ~0.02 of float32). Scores are remembered per (checkpoint, image), so a rerun, a new threshold or the other
 comparison column only loads a model for images it has not scored yet. Each tab's threshold is on
 P(bona fide) - an image is called bona fide when the score is at or above it.
 """
@@ -74,7 +75,7 @@ def scores(checkpoint, files, label):
                 gc.collect()
                 with st.spinner(f"Loading {label} (the first run downloads its backbone)..."):
                     slot["pad"] = FoundPADInference(checkpoint, download_dir=os.path.join(HERE, "models"),
-                                                    token=hf_token(), dino_dtype=torch.bfloat16)
+                                                    token=hf_token(), dino_dtype=torch.int8)
                 slot["key"] = key
             pad = slot["pad"]
             ready = []                                    # preprocess first: an unreadable file is reported
