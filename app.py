@@ -2,8 +2,8 @@
 
     streamlit run app.py
 
-Tabs: one per model - exp6_3_7 (CLIP ViT-L/14-336, best on every SaudiDocs test/ metric) and exp6_3_7
-on DINOv3 ViT-H+/16 (a checkpoint from inside its first epoch, never validated) - and comparison:
+Tabs: one per model - exp6_3_7 (CLIP ViT-L/14-336, test/ AUC 0.9989, ACER 0.042) and exp6_3_7
+on DINOv3 ViT-H+/16 (its best.pth: epoch 1, test/ AUC 0.9975, ACER 0.018) - and comparison:
 upload the images once, pick a model for each of the two columns, and every row shows the same image
 with each model's prediction. Every checkpoint is in the public Hugging Face repo (a local copy is
 used when there is one). DINOv3 itself is gated: the HF_TOKEN secret (a read token of an account
@@ -30,8 +30,8 @@ BATCH = 16                                     # images scored together, as in m
 TYPES = ["jpg", "jpeg", "png", "bmp", "webp", "heic", "heif"]
 MODELS = {                                     # model name -> checkpoint (a local .pth or a file in the HF repo)
     "exp6_3_7 (best in metrics)": "exp6_3_7/best.pth",   # exp6_3_4 + BID / RID (test/ AUC 0.9989, ACER 0.042)
-    "exp6_3_7 DINOv3 (partial)": "exp6_3_7_dinov3/partial_epoch1_batch862.pth",   # exp6_3_7 on DINOv3 ViT-H+/16,
-}                                              # stopped inside epoch 1 (batch 862) - never validated
+    "exp6_3_7 DINOv3": "exp6_3_7_dinov3/best.pth",   # exp6_3_7 on DINOv3 ViT-H+/16 (test/ AUC 0.9975, ACER 0.018)
+}
 
 
 def hf_token():
