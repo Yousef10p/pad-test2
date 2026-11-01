@@ -10,8 +10,8 @@ used when there is one). DINOv3 itself is gated: the HF_TOKEN secret (a read tok
 that accepted its license) is needed for its tab.
 
 Memory: one ViT-L is ~2 GB and Streamlit Community Cloud allows ~2.7 GB, so only one model is held
-at a time; DINOv3 ViT-H+ is 3.4 GB in float32, so its frozen weights are loaded in bfloat16 (1.7 GB;
-LoRA and head stay float32). Scores are remembered per (checkpoint, image), so a rerun, a new threshold or the other
+at a time; DINOv3 ViT-H+ is 3.4 GB in float32, so its Linear weights are stored in bfloat16 (1.7 GB)
+and cast to float32 layer by layer as they are used (foundpad_inference.load_lean). Scores are remembered per (checkpoint, image), so a rerun, a new threshold or the other
 comparison column only loads a model for images it has not scored yet. Each tab's threshold is on
 P(bona fide) - an image is called bona fide when the score is at or above it.
 """
@@ -27,6 +27,7 @@ from foundpad_inference import FoundPADInference, THRESHOLD
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 BATCH = 16                                     # images scored together, as in main.py
+DINO_BATCH = 2                                 # DINOv3 ViT-H+: fewer, to keep its activations small
 TYPES = ["jpg", "jpeg", "png", "bmp", "webp", "heic", "heif"]
 MODELS = {                                     # model name -> checkpoint (a local .pth or a file in the HF repo)
     "exp6_3_7 (best in metrics)": "exp6_3_7/best.pth",   # exp6_3_4 + BID / RID (test/ AUC 0.9989, ACER 0.042)
@@ -83,11 +84,12 @@ def scores(checkpoint, files, label):
                 except (FileNotFoundError, ValueError) as e:
                     memory[i] = (None, str(e))
             progress = st.progress(0.0, text=f"Scoring with {label}: 0/{len(ready)} images")
-            for b in range(0, len(ready), BATCH):
-                chunk = ready[b:b + BATCH]
+            batch = DINO_BATCH if pad.kind == "dino" else BATCH
+            for b in range(0, len(ready), batch):
+                chunk = ready[b:b + batch]
                 for (i, _), r in zip(chunk, pad.infer(torch.cat([x for _, x in chunk]))):
                     memory[i] = (r["score_bona_fide"], None)
-                done = min(b + BATCH, len(ready))
+                done = min(b + batch, len(ready))
                 progress.progress(done / len(ready), text=f"Scoring with {label}: {done}/{len(ready)} images")
             progress.empty()
     return [memory[i] for i in ids]

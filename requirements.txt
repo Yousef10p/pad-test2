@@ -7,6 +7,9 @@
 # The first run downloads the frozen CLIP ViT-B/16 (openai/clip-vit-base-patch16, ~600 MB) into
 # the Hugging Face cache; later runs reuse it.
 
+# CPU-only torch: Streamlit Community Cloud has no GPU, and the CUDA build adds ~2.8 GB of
+# libraries and import-time memory under its 2.7 GB limit
+--extra-index-url https://download.pytorch.org/whl/cpu
 torch>=2.1
 torchvision>=0.16          # Resize / ToTensor / Normalize
 transformers>=4.56         # CLIP and DINOv3 (4.56 is the first with DINOv3; 5.x works)

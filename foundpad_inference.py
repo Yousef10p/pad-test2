@@ -72,6 +72,66 @@ HF_FILE = "exp6_3_7/best.pth"              # the default model: EXP6_3_7 (ViT-L/
 DOWNLOAD_DIR = "models"                    # downloads land in DOWNLOAD_DIR/<path in the repo>
 
 
+def _linear_upcast(self, x):
+    """nn.Linear.forward with the weights stored in a smaller dtype: cast to the input's (float32) for
+    this call only - float32 math, which CPUs without native bfloat16 run ~10x faster."""
+    return torch.nn.functional.linear(x, self.weight.to(x.dtype),
+                                      None if self.bias is None else self.bias.to(x.dtype))
+
+
+def load_lean(model_id, dtype, token=None):
+    """AutoModel.from_pretrained for a one-file safetensors model, holding its Linear weights in `dtype`
+    (bfloat16: half the memory) and everything else - norms, layer scales, tokens, patch embedding, ~0.1 %
+    of DINOv3 - in float32. The Linear layers still compute in float32 (_linear_upcast), so only the
+    weights are rounded. The model is filled one tensor at a time with plain file reads - no memory map,
+    whose pages pile up next to the converted copy (DINOv3 ViT-H+: a 3.4 GB float32 file loads in
+    ~1.7 GB, under Streamlit Community Cloud's 2.7 GB limit). dtype float32: an ordinary float32 model."""
+    import json
+    import struct
+    import types
+
+    from huggingface_hub import hf_hub_download
+    from transformers import AutoConfig, AutoModel
+
+    path = hf_hub_download(model_id, "model.safetensors", token=token)
+    # built (randomly initialized) in dtype, then overwritten; dtype must be passed: transformers
+    # otherwise takes the config's (float32) over torch's default dtype
+    model = AutoModel.from_config(AutoConfig.from_pretrained(model_id, token=token), dtype=dtype)
+    if next(model.parameters()).dtype != dtype:
+        raise RuntimeError(f"{model_id} was built in {next(model.parameters()).dtype}, not {dtype}")
+    for module in model.modules():
+        if isinstance(module, torch.nn.Linear):
+            if dtype != torch.float32:
+                module.forward = types.MethodType(_linear_upcast, module)
+        else:                                      # the small rest back to float32 (its own parameters only)
+            for p in module.parameters(recurse=False):
+                p.data = p.data.float()
+    params = model.state_dict()                    # the model's own tensors: copy_ fills the model
+    dtypes = {"F32": torch.float32, "F16": torch.float16, "BF16": torch.bfloat16}
+    loaded = set()
+    with open(path, "rb", buffering=0) as f:
+        n = struct.unpack("<Q", f.read(8))[0]
+        header = json.loads(f.read(n))
+        for key, meta in header.items():
+            if key == "__metadata__":
+                continue
+            name = key if key in params else f"model.{key}"   # transformers 5 moved DINOv3's blocks under .model
+            if name not in params:
+                raise ValueError(f"{model_id}: weight {key!r} has no place in {type(model).__name__}")
+            begin, end = meta["data_offsets"]
+            f.seek(8 + n + begin)
+            t = torch.frombuffer(bytearray(f.read(end - begin)), dtype=dtypes[meta["dtype"]])
+            with torch.no_grad():
+                params[name].copy_(t.reshape(meta["shape"]))
+            loaded.add(name)
+            if hasattr(os, "posix_fadvise"):       # Linux: drop the file's pages from the cache as we go
+                os.posix_fadvise(f.fileno(), 8 + n + begin, end - begin, os.POSIX_FADV_DONTNEED)
+    if loaded != set(params):
+        raise ValueError(f"{model_id}: {len(set(params) - loaded)} weights missing from its file, "
+                         f"e.g. {sorted(set(params) - loaded)[:2]}")
+    return model
+
+
 def lora_width(sd):
     """The backbone width a FoundPAD state dict was trained on (its LoRA A matrices' input size,
     a BACKBONES key); ValueError when it is not one FoundPAD state dict."""
@@ -87,9 +147,9 @@ class FoundPADInference:
                  token=None, download_dir=DOWNLOAD_DIR, dino_dtype=torch.float32):
         """Rebuild the checkpoint's backbone (BACKBONES: CLIP or DINOv3) + rank-stabilized LoRA +
         linear head and load the checkpoint - a local file, or a file inside `repo`, downloaded
-        into `download_dir` the first time. dino_dtype: the frozen DINOv3's weights - float32 as
-        the notebook evaluates (3.4 GB), or torch.bfloat16 (1.7 GB) where memory is short (the
-        Streamlit Cloud app); LoRA and head stay float32 either way."""
+        into `download_dir` the first time. dino_dtype: how the frozen DINOv3's Linear weights are
+        stored - float32 as the notebook evaluates (3.4 GB), or torch.bfloat16 (1.7 GB) where memory
+        is short (the Streamlit Cloud app; load_lean). The math is float32 either way."""
         import importlib.metadata
         import importlib.util
         import subprocess
@@ -109,7 +169,7 @@ class FoundPADInference:
         except ImportError:
             pass
         from peft import LoraConfig, get_peft_model
-        from transformers import AutoModel, CLIPModel
+        from transformers import CLIPModel
 
         checkpoint = str(checkpoint)
         downloaded = os.path.normpath(os.path.join(download_dir, checkpoint))
@@ -139,7 +199,7 @@ class FoundPADInference:
         self.kind = "dino" if width == 1280 else "clip"   # the notebook's attribute name = its key prefix
 
         if self.kind == "dino":                            # float32 weights, as the notebook, unless dino_dtype
-            backbone = AutoModel.from_pretrained(self.clip_id, token=token, dtype=dino_dtype)
+            backbone = load_lean(self.clip_id, dino_dtype, token=token)
             embed_dim = backbone.config.hidden_size        # 1280: the head sits on pooler_output
         else:
             backbone = CLIPModel.from_pretrained(self.clip_id)
@@ -158,7 +218,6 @@ class FoundPADInference:
             raise ValueError(f"{checkpoint} does not match FoundPAD: {len(lost)} LoRA/head weights "
                              f"missing, {len(unexpected)} unexpected (e.g. {(lost + unexpected)[:2]})")
         self.model.to(self.device).eval()
-        self.dtype = next(self.model[self.kind].get_base_model().parameters()).dtype   # the backbone's input dtype
         self.epoch = ck.get("epoch") if isinstance(ck, dict) else None
         self.to_tensor = transforms.Compose([transforms.Resize((self.input_size, self.input_size)),
                                              transforms.ToTensor(),
@@ -220,7 +279,7 @@ class FoundPADInference:
         if not torch.is_tensor(x) or x.ndim != 4 or tuple(x.shape[1:]) != (3, n, n):
             raise ValueError(f"expected a (N, 3, {n}, {n}) tensor from preprocess(), "
                              f"got {tuple(x.shape) if torch.is_tensor(x) else type(x).__name__}")
-        x = x.to(self.device, self.dtype)            # float32, as the notebooks evaluate (unless dino_dtype)
+        x = x.to(self.device)                        # float32, as the notebooks evaluate
         if self.kind == "dino":                      # DINOv3: the CLS token after the final norm
             e = self.model["dino"](pixel_values=x).pooler_output.float()
         else:
