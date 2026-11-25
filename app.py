@@ -2,16 +2,17 @@
 
     streamlit run app.py
 
-Tabs: one per model - exp6_3_7 (CLIP ViT-L/14-336, test/ AUC 0.9989, ACER 0.042) and exp6_3_7
-on DINOv3 ViT-H+/16 (its best.pth: epoch 1, test/ AUC 0.9975, ACER 0.018) - and comparison:
-upload the images once, pick a model for each of the two columns, and every row shows the same image
-with each model's prediction. Every checkpoint is in the public Hugging Face repo (a local copy is
-used when there is one). DINOv3 itself is gated: the HF_TOKEN secret (a read token of an account
-that accepted its license) is needed for its tab.
+Tabs: one per model - exp6_3_7 (CLIP ViT-L/14-336, test/ AUC 0.9989, ACER 0.042), exp6_3_7
+on DINOv3 ViT-H+/16 (its best.pth: epoch 1, test/ AUC 0.9975, ACER 0.018) and exp6_3_7 on DINOv3
+ViT-L/16 with LoRA on every linear layer (EXP6_3_7_DINOV3_VITL_LORA_ALL_KAGGLE, best.pth: epoch 1,
+test/ AUC 0.9974, ACER 0.033) - and comparison: upload the images once, pick a model for each of the
+two columns, and every row shows the same image with each model's prediction. Every checkpoint is in
+a public Hugging Face repo (a local copy is used when there is one). DINOv3 itself is gated: the
+HF_TOKEN secret (a read token of an account that accepted its license) is needed for its tabs.
 
 Memory: one ViT-L is ~2 GB and Streamlit Community Cloud allows ~2.7 GB, so only one model is held
-at a time; DINOv3 ViT-H+ is 3.4 GB in float32, so its Linear weights are stored in int8 with a scale
-per row (0.85 GB; the app peaks ~1.5 GB) and made float32 layer by layer as they are used
+at a time; DINOv3 ViT-H+ is 3.4 GB in float32 (ViT-L 1.2 GB), so its Linear weights are stored in
+int8 with a scale per row (0.85 GB; the app peaks ~1.5 GB) and made float32 layer by layer as they are used
 (foundpad_inference.load_lean; scores within ~0.02 of float32). Scores are remembered per (checkpoint, image), so a rerun, a new threshold or the other
 comparison column only loads a model for images it has not scored yet. Each tab's threshold is on
 P(bona fide) - an image is called bona fide when the score is at or above it.
@@ -30,9 +31,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 BATCH = 16                                     # images scored together, as in main.py
 DINO_BATCH = 2                                 # DINOv3 ViT-H+: fewer, to keep its activations small
 TYPES = ["jpg", "jpeg", "png", "bmp", "webp", "heic", "heif"]
-MODELS = {                                     # model name -> checkpoint (a local .pth or a file in the HF repo)
+MODELS = {                                     # model name -> checkpoint (a local .pth, a file in the HF repo or hf://)
     "exp6_3_7 (best in metrics)": "exp6_3_7/best.pth",   # exp6_3_4 + BID / RID (test/ AUC 0.9989, ACER 0.042)
     "exp6_3_7 DINOv3": "exp6_3_7_dinov3/best.pth",   # exp6_3_7 on DINOv3 ViT-H+/16 (test/ AUC 0.9975, ACER 0.018)
+    "exp6_3_7 DINOv3 ViT-L (LoRA all)":                # exp6_3_7 on DINOv3 ViT-L/16, LoRA r 16 on every linear layer
+        "hf://US10F/dinoLivenesscard/kaggle_EXP6_3_7_DINOV3_VITL_LORA_ALL/checkpoints/best.pth",   # (test/ AUC 0.9974, ACER 0.033)
 }
 
 
@@ -128,7 +131,8 @@ def model_tab(name, default_checkpoint):
     """One model: settings, uploader, then every image with its score, three per row."""
     with st.expander("Settings"):
         checkpoint = st.text_input("Checkpoint", default_checkpoint, key=f"{name}_ckpt",
-                                   help="A local .pth, or a file inside the Hugging Face repo.")
+                                   help="A local .pth, a file inside the Hugging Face repo, or "
+                                        "hf://<owner>/<repo>/<path> for another repo.")
         threshold = threshold_slider(f"{name}_thr")
     files = st.file_uploader("Images", type=TYPES, accept_multiple_files=True, key=f"{name}_files")
     if not files:

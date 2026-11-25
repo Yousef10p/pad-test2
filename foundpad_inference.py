@@ -7,23 +7,28 @@ SaudiDocs test/ frames (the default model: exp6_3_7/EXP6_3_7.ipynb).
     x = pad.preprocess("id_photo.jpg")                     # raises ValueError / FileNotFoundError
     print(pad.infer(x))    # [{'score_bona_fide': 0.93, 'decision': 'bona fide', 'threshold': 0.5}]
 
-checkpoint: a local file, or a file inside HF_REPO. Looked for, in order: the path as given,
-DOWNLOAD_DIR/<path> (downloaded before - no network), else downloaded from HF_REPO into
-DOWNLOAD_DIR. Every FoundPAD checkpoint in the repo works - all come from the same pipeline.
+checkpoint: a local file, a file inside HF_REPO, or "hf://<owner>/<repo>/<path>" for a file in
+another repo (e.g. hf://US10F/dinoLivenesscard/kaggle_EXP6_3_7_DINOV3_VITL_LORA_ALL/checkpoints/best.pth).
+Looked for, in order: the path as given, DOWNLOAD_DIR/<path> (downloaded before - no network), else
+downloaded from the repo into DOWNLOAD_DIR. Every FoundPAD checkpoint works - all come from the same pipeline.
 A private repo needs a token: token="hf_...", or the HF_TOKEN environment variable. So does
 DINOv3, which is gated: the token's account must have accepted its license on Hugging Face.
 
 The checkpoint is what the notebook saves: {"model": state_dict, ...}. Tiny checkpoints hold the
 LoRA + head weights only (the frozen backbone is rebuilt from its HF model id); a full state dict
 loads too. The backbone, its normalization and its image sizes come from the checkpoint itself
-(its LoRA width -> BACKBONES), so one class serves every kind:
-    768  = CLIP ViT-B/16       frame 256 -> input 224   (EXP1, EXP5)
-    1024 = CLIP ViT-L/14-336   frame 384 -> input 336   (EXP6_3_2 ... EXP6_3_7)
-    1280 = DINOv3 ViT-H+/16    frame 384 -> input 336   (EXP6_3_7_DINOV3_VITH_PLUS_KAGGLE)
+(its key prefix "clip." / "dino." and its LoRA width -> BACKBONES), so one class serves every kind:
+    clip 768  = CLIP ViT-B/16       frame 256 -> input 224   (EXP1, EXP5)
+    clip 1024 = CLIP ViT-L/14-336   frame 384 -> input 336   (EXP6_3_2 ... EXP6_3_7)
+    dino 1280 = DINOv3 ViT-H+/16    frame 384 -> input 336   (EXP6_3_7_DINOV3_VITH_PLUS_KAGGLE)
+    dino 1024 = DINOv3 ViT-L/16     frame 384 -> input 336   (EXP6_3_7_DINOV3_VITL_LORA_ALL_KAGGLE)
 EXP6_3_7 = EXP6_3_4 + BID and RID in training; its preprocessing and scoring are EXP6_3_4's.
-The DINOv3 run is EXP6_3_7 with the backbone swapped: the head sits on DINOv3's pooler_output (the
-CLS token after the final norm, 1280-D) instead of CLIP's projected image embedding, and the
+The DINOv3 runs are EXP6_3_7 with the backbone swapped: the head sits on DINOv3's pooler_output (the
+CLS token after the final norm, 1280-D / 1024-D) instead of CLIP's projected image embedding, and the
 normalization is DINOv3's (ImageNet) instead of CLIP's.
+The LoRA layers and rank are read from the checkpoint too. Its alpha and rsLoRA flag are not saved
+in it, so they follow the run's recipe: LoRA on q, v only = the paper's (r 8, alpha 8, rsLoRA);
+LoRA on every linear layer (the *_LORA_ALL runs) = the standard one (alpha = 2r, plain alpha / r).
 
 Score = softmax P(bona fide), as in the paper: HIGH means bona fide, and an image is called
 bona fide when score >= threshold. The default threshold is the fixed 0.5 - the per-set EER
@@ -48,20 +53,21 @@ DINO_MEAN = (0.485, 0.456, 0.406)          # DINOv3's own normalization (ImageNe
 DINO_STD = (0.229, 0.224, 0.225)
 
 # ---------- the backbone - picked per checkpoint, never set by hand ----------
-# backbone width (= a LoRA A matrix's input size, read from the checkpoint) ->
+# (kind, backbone width) - read from the checkpoint: its key prefix and a q_proj LoRA A matrix's input size ->
 #   (HF model, frame size, model input, mean, std): the image is resized to frame size and JPEG-encoded
 #   as the notebook's frame cache, then resized to the model input and normalized with mean / std
 BACKBONES = {
-    768: ("openai/clip-vit-base-patch16", 256, 224, CLIP_MEAN, CLIP_STD),          # ViT-B/16: EXP1, EXP5 (the paper's sizes)
-    1024: ("openai/clip-vit-large-patch14-336", 384, 336, CLIP_MEAN, CLIP_STD),    # ViT-L/14-336: EXP6_3_2 ... EXP6_3_7 (same ratio)
-    1280: ("facebook/dinov3-vith16plus-pretrain-lvd1689m", 384, 336, DINO_MEAN, DINO_STD),   # DINOv3 ViT-H+/16 (gated)
+    ("clip", 768): ("openai/clip-vit-base-patch16", 256, 224, CLIP_MEAN, CLIP_STD),          # ViT-B/16: EXP1, EXP5 (the paper's sizes)
+    ("clip", 1024): ("openai/clip-vit-large-patch14-336", 384, 336, CLIP_MEAN, CLIP_STD),    # ViT-L/14-336: EXP6_3_2 ... EXP6_3_7 (same ratio)
+    ("dino", 1280): ("facebook/dinov3-vith16plus-pretrain-lvd1689m", 384, 336, DINO_MEAN, DINO_STD),   # DINOv3 ViT-H+/16 (gated)
+    ("dino", 1024): ("facebook/dinov3-vitl16-pretrain-lvd1689m", 384, 336, DINO_MEAN, DINO_STD),       # DINOv3 ViT-L/16 (gated)
 }
 
-# ---------- the rest of the notebooks' configuration - the same for every backbone ----------
-LORA_R, LORA_ALPHA, LORA_DROPOUT = 8, 8, 0.4
-LORA_TARGETS = {                           # q and v of every attention block (12 in ViT-B, 24 in ViT-L, 32 in ViT-H+)
-    "clip": r".*vision_model.*\.(q_proj|v_proj)",           # CLIP: the vision tower only
-    "dino": r".*layer\.\d+\.attention\.(q_proj|v_proj)",    # DINOv3's module names
+# ---------- the LoRA - its layers and rank come from the checkpoint, alpha / rsLoRA from its recipe ----------
+LORA_DROPOUT = 0.4                         # inactive at inference (eval mode)
+LORA_TARGETS = {                           # the vision blocks' layers LoRA may sit on, as {names} in the pattern
+    "clip": r".*vision_model.*\.({names})",                 # CLIP: the vision tower only
+    "dino": r".*layer\.\d+\.(?:attention|mlp)\.({names})",  # DINOv3's module names (q/k/v/o_proj, up/down_proj)
 }
 BONA = 0                                   # label 0 = bona fide; the score is softmax[:, BONA]
 THRESHOLD = 0.5                            # fixed decision threshold
@@ -146,24 +152,30 @@ def load_lean(model_id, dtype, token=None):
     return model
 
 
-def lora_width(sd):
-    """The backbone width a FoundPAD state dict was trained on (its LoRA A matrices' input size,
-    a BACKBONES key); ValueError when it is not one FoundPAD state dict."""
-    widths = {v.shape[1] for k, v in sd.items() if "lora_A" in k}
-    if len(widths) != 1 or next(iter(widths)) not in BACKBONES:
-        raise ValueError(f"not a FoundPAD checkpoint: LoRA width {sorted(widths)}, "
-                         f"expected one of {sorted(BACKBONES)}")
-    return widths.pop()
+def lora_layout(sd):
+    """What a FoundPAD state dict was trained with: (kind, width, rank, layers) - kind "clip" / "dino"
+    (its key prefix), the backbone width (a q_proj LoRA A matrix's input size; (kind, width) is a
+    BACKBONES key), the LoRA rank and the layer names LoRA sits on (e.g. {"q_proj", "v_proj"}).
+    ValueError when it is not one FoundPAD state dict."""
+    kind = "dino" if any(k.startswith("dino.") for k in sd) else "clip"
+    a = {k: v for k, v in sd.items() if "lora_A" in k}
+    widths = {v.shape[1] for k, v in a.items() if ".q_proj." in k}
+    ranks = {v.shape[0] for v in a.values()}
+    if len(widths) != 1 or (kind, next(iter(widths))) not in BACKBONES or len(ranks) != 1:
+        raise ValueError(f"not a FoundPAD checkpoint: {kind} q_proj LoRA width {sorted(widths)}, rank "
+                         f"{sorted(ranks)}; expected one rank and one of {sorted(BACKBONES)}")
+    layers = {k.split(".lora_A")[0].rsplit(".", 1)[-1] for k in a}
+    return kind, widths.pop(), ranks.pop(), layers
 
 
 class FoundPADInference:
     def __init__(self, checkpoint=HF_FILE, device=None, threshold=THRESHOLD, repo=HF_REPO,
                  token=None, download_dir=DOWNLOAD_DIR, dino_dtype=torch.float32):
-        """Rebuild the checkpoint's backbone (BACKBONES: CLIP or DINOv3) + rank-stabilized LoRA +
-        linear head and load the checkpoint - a local file, or a file inside `repo`, downloaded
-        into `download_dir` the first time. dino_dtype: how the frozen DINOv3's Linear weights are
-        stored - float32 as the notebook evaluates (3.4 GB), torch.bfloat16 (1.7 GB) or torch.int8
-        (0.85 GB, the Streamlit Cloud app) where memory is short (load_lean). The math is float32."""
+        """Rebuild the checkpoint's backbone (BACKBONES: CLIP or DINOv3) + its LoRA + linear head and
+        load the checkpoint - a local file, a file inside `repo` or an hf:// path, downloaded into
+        `download_dir` the first time. dino_dtype: how the frozen DINOv3's Linear weights are stored -
+        float32 as the notebook evaluates (ViT-H+ 3.4 GB, ViT-L 1.2 GB), torch.bfloat16 (half) or
+        torch.int8 (a quarter, the Streamlit Cloud app) where memory is short (load_lean). The math is float32."""
         import importlib.metadata
         import importlib.util
         import subprocess
@@ -186,6 +198,9 @@ class FoundPADInference:
         from transformers import CLIPModel
 
         checkpoint = str(checkpoint)
+        if checkpoint.startswith("hf://"):                 # hf://<owner>/<repo>/<path>: a file in another repo
+            owner, name, checkpoint = checkpoint[len("hf://"):].split("/", 2)
+            repo = f"{owner}/{name}"
         downloaded = os.path.normpath(os.path.join(download_dir, checkpoint))
         if not os.path.isfile(checkpoint) and os.path.isfile(downloaded):
             checkpoint = downloaded                        # fetched on an earlier run
@@ -206,15 +221,18 @@ class FoundPADInference:
         ck = torch.load(checkpoint, map_location="cpu", weights_only=False)
         sd = ck["model"] if isinstance(ck, dict) and "model" in ck else ck
         try:
-            width = lora_width(sd)
+            self.kind, width, rank, layers = lora_layout(sd)   # kind: the notebook's attribute name = its key prefix
         except ValueError as e:
             raise ValueError(f"{checkpoint} does not match FoundPAD: {e}") from None
-        self.clip_id, self.frame_size, self.input_size, mean, std = BACKBONES[width]
-        self.kind = "dino" if width == 1280 else "clip"   # the notebook's attribute name = its key prefix
+        self.clip_id, self.frame_size, self.input_size, mean, std = BACKBONES[self.kind, width]
+        if layers == {"q_proj", "v_proj"}:                 # the paper's recipe: r 8, alpha 8, rsLoRA (alpha / sqrt r)
+            alpha, rslora = rank, True
+        else:                                              # every linear layer (*_LORA_ALL): alpha = 2r, plain alpha / r
+            alpha, rslora = 2 * rank, False
 
         if self.kind == "dino":                            # float32 weights, as the notebook, unless dino_dtype
             backbone = load_lean(self.clip_id, dino_dtype, token=token)
-            embed_dim = backbone.config.hidden_size        # 1280: the head sits on pooler_output
+            embed_dim = backbone.config.hidden_size        # 1280 / 1024: the head sits on pooler_output
         else:
             backbone = CLIPModel.from_pretrained(self.clip_id)
             embed_dim = backbone.config.projection_dim     # CLIP's projected image embedding
@@ -222,8 +240,8 @@ class FoundPADInference:
         # ModuleDict names its children "clip." / "dino." and "head." - the notebooks' FoundPAD key names
         self.model = torch.nn.ModuleDict({
             self.kind: get_peft_model(backbone, LoraConfig(
-                r=LORA_R, lora_alpha=LORA_ALPHA, lora_dropout=LORA_DROPOUT,
-                target_modules=LORA_TARGETS[self.kind], use_rslora=True, bias="none")),
+                r=rank, lora_alpha=alpha, lora_dropout=LORA_DROPOUT, use_rslora=rslora, bias="none",
+                target_modules=LORA_TARGETS[self.kind].format(names="|".join(sorted(layers))))),
             "head": torch.nn.Linear(embed_dim, 2)})
 
         missing, unexpected = self.model.load_state_dict(sd, strict=False)
@@ -242,8 +260,7 @@ class FoundPADInference:
         frames: upright by EXIF orientation -> RGB -> frame_size bicubic -> JPEG q95 (the notebook's
         frame cache) -> input_size -> the backbone's normalization. frame_size / input_size are the
         loaded backbone's (BACKBONES): 256 -> 224 for ViT-B/16, 384 -> 336 for ViT-L/14-336 and
-        DINOv3 ViT-H+/16. An image
-        already frame_size square is used as is (no EXIF turn, no JPEG), as the notebook does.
+        DINOv3 ViT-H+/16 and ViT-L/16. An image already frame_size square is used as is (no EXIF turn, no JPEG), as the notebook does.
 
         image: a file path, raw bytes, or a PIL image.
         Raises FileNotFoundError for a missing path, ValueError for anything that is not a
